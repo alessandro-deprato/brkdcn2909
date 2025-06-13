@@ -1,0 +1,21 @@
+epbr service-chain SINGLE-FUNCT-CHAIN-SITE-1
+  load-balance method src-dst-ipprotocol
+  mode multisite failover-group SINGLE-FUNCT-CHAIN-FOVER-SITE-1
+  10 set service FIREWALL-1-SITE-1 fail-action drop
+
+epbr service-chain SINGLE-FUNCT-CHAIN-SITE-2
+  load-balance method src-dst-ipprotocol
+  10 set service FIREWALL-1-SITE-2 fail-action drop
+
+epbr failover-group SINGLE-FUNCT-CHAIN-FOVER-SITE-1
+  service-chain SINGLE-FUNCT-CHAIN-SITE-2 preference 1
+
+class-map type security match-any TCP-PORT-1003
+  match ipv4 tcp dport 1003
+
+policy-map type security MULTI-SITE-EPBR
+  class TCP-PORT-1003
+    service-chain SINGLE-FUNCT-CHAIN-SITE-1
+
+vrf context hyper_vrf 
+  security contract source 5000 destination any policy MULTI-SITE-EPBR

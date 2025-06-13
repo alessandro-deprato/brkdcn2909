@@ -1,0 +1,197 @@
+---
+- name: Push NDFC GPO config via REST
+  hosts: ndfc04
+  any_errors_fatal: true
+  gather_facts: false
+  vars:
+    fabric:
+      name: "MIL-PHY-MSD-FABRIC"
+    gpo:
+      security_groups:
+        - name: APPLICATION-101
+          sgt: "4999"
+          vrf: hyper_vrf
+          connected_selector:
+            - 172.17.21.101
+        - name: APPLICATION-102
+          sgt: "5002"
+          vrf: hyper_vrf
+          connected_selector:
+            - 172.17.21.102
+        - name: FRONTEND-NET
+          sgt: "5003"
+          vrf: hyper_vrf
+          connected_selector:
+            - 172.17.20.0/24
+        - name: MONITORING-NET
+          sgt: "5000"
+          vrf: hyper_vrf
+          connected_selector:
+            - 172.17.22.0/24
+        - name: "ANY"
+          sgt: -1
+          vrf: "hyper_vrf"
+          deploy: False
+      filters:
+        - name: TCP-1002
+          protocol: TCP
+          dst_port: "1002"
+        - name: TCP-1004
+          protocol: TCP
+          dst_port: "1004"
+      contracts:
+        - name: MONITORING-TO-ANY
+          filters: 
+            - TCP-1004
+        - name: MONITORING-TO-AP-101
+          filters: 
+            - TCP-1002
+        - name: MONITORING-TO-FE-101
+          filters: 
+            - default
+        - name: ANY-TO-ANY
+          filters: 
+            - icmp
+      contract_associations: 
+        - src: ANY
+          dst: ANY
+          contract: ANY-TO-ANY
+        - src: MONITORING-NET
+          dst: APPLICATION-101
+          contract: MONITORING-TO-AP-101
+        - src: MONITORING-NET
+          dst: ANY
+          contract: MONITORING-TO-ANY
+        - src: MONITORING-NET
+          dst: FRONTEND-NET
+          contract: MONITORING-TO-FE-101
+
+  tasks:
+    - name: Create connected EP into GPO groups
+      tags: security_groups
+      cisco.dcnm.dcnm_rest:
+        method: POST
+        path: "/appcenter/cisco/ndfc/api/v1/security/fabrics/{{fabric.name }}/groups"
+        json_data: >-
+          {% set ip_list = [] %}
+          {% for ip in item.connected_selector %}
+          {% set _ = ip_list.append({
+            "index": loop.index0,
+            "type": "Connected Endpoints",
+            "vrfName": item.vrf,
+            "ip": ip
+          }) %}
+          {% endfor %}
+          {{ [{
+            "groupName": item.name,
+            "groupId": item.sgt | int,
+            "ipSelectors": ip_list
+          }] | to_json }}
+      loop: "{{ gpo.security_groups | selectattr('connected_selector','defined') | list }}"
+      when: item.deploy | default(True)
+      register: result
+      failed_when:
+        - ('response' in result and result.response.RETURN_CODE != 200) or ('msg' in result and result.msg.RETURN_CODE != 200)
+        - ('response' in result and "Resource already exists" not in result.response.DATA.failureList[0].message) or ('msg' in result and "Resource already exists" not in result.msg.DATA.failureList[0].message)
+
+    - name: Create external subnets into GPO groups
+      tags: security_groups
+      cisco.dcnm.dcnm_rest:
+        method: POST
+        path: "/appcenter/cisco/ndfc/api/v1/security/fabrics/{{fabric.name }}/groups"
+        json_data: >-
+          {% set ip_list = [] %}
+          {% for ip in item.external_selector %}
+          {% set _ = ip_list.append({
+            "index": loop.index0,
+            "type": "External Subnets",
+            "vrfName": item.vrf,
+            "ip": ip
+          }) %}
+          {% endfor %}
+          {{ [{
+            "groupName": item.name,
+            "groupId": item.sgt | int,
+            "ipSelectors": ip_list,
+            "networkSelectors": []
+          }] | to_json }}
+      loop: "{{ gpo.security_groups | selectattr('external_selector','defined') | list }}"
+      when: item.deploy | default(True)
+      register: result
+      failed_when:
+        - ('response' in result and result.response.RETURN_CODE != 200) or ('msg' in result and result.msg.RETURN_CODE != 200)
+        - ('response' in result and "Resource already exists" not in result.response.DATA.failureList[0].message) or ('msg' in result and "Resource already exists" not in result.msg.DATA.failureList[0].message)
+
+    - name: Create GPO filters
+      tags: filters
+      cisco.dcnm.dcnm_rest:
+        method: POST
+        path: "/appcenter/cisco/ndfc/api/v1/security/fabrics/{{fabric.name }}/protocols"
+        json_data: >-
+          {{ [{
+            'protocolName': item.name,
+            'description': '',
+            'matchType': 'any',
+            'matchItems': [
+              {
+                'type': 'IPv4',
+                'protocolOptions': item.protocol,
+                'srcPortRange': '',
+                'dstPortRange': item.dst_port,
+                'dscp': None,
+                'onlyFragments': False,
+                'stateful': False
+              }
+            ]
+          }] | to_json }}
+      loop: "{{ gpo.filters }}"
+      register: result
+      failed_when:
+        - ('response' in result and result.response.RETURN_CODE != 200) or ('msg' in result and result.msg.RETURN_CODE != 200)
+        - ('response' in result and "Resource already exists" not in result.response.DATA.failureList[0].message) or ('msg' in result and "Resource already exists" not in result.msg.DATA.failureList[0].message)
+
+    - name: Create contracts 
+      tags: contracts
+      cisco.dcnm.dcnm_rest:
+        method: POST
+        path: "/appcenter/cisco/ndfc/api/v1/security/fabrics/{{fabric.name }}/contracts"
+        json_data: >-
+          {% set rules = [] %}
+          {% for f in item.filters %}
+          {% set _ = rules.append({
+            "direction": "bidirectional",
+            "action": "permit",
+            "protocolName": f
+          }) %}
+          {% endfor %}
+          {{ [{
+            "contractName": item.name,
+            "description": "",
+            "rules": rules
+          }] | to_json }}
+      loop: "{{ gpo.contracts }}"
+      register: result
+      failed_when:
+        - ('response' in result and result.response.RETURN_CODE != 200) or ('msg' in result and result.msg.RETURN_CODE != 200)
+        - ('response' in result and "Resource already exists" not in result.response.DATA.failureList[0].message) or ('msg' in result and "Resource already exists" not in result.msg.DATA.failureList[0].message)
+
+    - name: Associate contracts to security groups
+      tags: contract_associations
+      cisco.dcnm.dcnm_rest:
+        method: POST
+        path: "/appcenter/cisco/ndfc/api/v1/security/fabrics/{{fabric.name }}/contractAssociations"
+        json_data: >-
+          {{ [{
+            "srcGroupId": gpo.security_groups | selectattr('name', 'equalto', item.src) | map(attribute='sgt') | first | int,
+            "dstGroupId": gpo.security_groups | selectattr('name', 'equalto', item.dst) | map(attribute='sgt') | first | int,
+            "fabricName":fabric.name,
+            "srcGroupName": item.src,
+            "dstGroupName": item.dst,
+            "vrfName": gpo.security_groups | selectattr('name', 'equalto', item.src) | map(attribute='vrf') | first,
+            "contractName": item.contract
+          }] | to_json }}
+      loop: "{{ gpo.contract_associations }}"
+      register: result
+      failed_when:
+        - ('response' in result and result.response.RETURN_CODE != 200) or ('msg' in result and result.msg.RETURN_CODE != 200)
+        - ('response' in result and "Resource already exists" not in result.response.DATA.failureList[0].message) or ('msg' in result and "Resource already exists" not in result.msg.DATA.failureList[0].message)

@@ -1,0 +1,173 @@
+---
+- name: Push NDFC GPO config via REST
+  hosts: ndfc04
+  any_errors_fatal: true
+  gather_facts: false
+  vars:
+    fabric:
+      name: "MIL-PHY-MSD-FABRIC"
+    gpo:
+      security_groups:
+        - name: APPLICATION-101
+          sgt: "4999"
+          vrf: hyper_vrf
+          connected_selector:
+            - 172.17.21.101
+        - name: APPLICATION-102
+          sgt: "5002"
+          vrf: hyper_vrf
+          connected_selector:
+            - 172.17.21.102
+        - name: FRONTEND-NET
+          sgt: "5003"
+          vrf: hyper_vrf
+          connected_selector:
+            - 172.17.20.0/24
+        - name: MONITORING-NET
+          sgt: "5000"
+          vrf: hyper_vrf
+          connected_selector:
+            - 172.17.22.0/24
+      filters:
+        - name: TCP-1002
+          protocol: TCP
+          dst_port: "1002"
+        - name: TCP-1004
+          protocol: TCP
+          dst_port: "1002"
+      contracts:
+        - name: MONITORING-TO-ANY
+          filters: 
+            - TCP-1004
+        - name: MONITORING-TO-AP-101
+          filters: 
+            - TCP-1002
+        - name: MONITORING-TO-FE-101
+          filters: 
+            - default
+        - name: ANY-TO-ANY
+          filters: 
+            - icmp
+  tasks:
+    ## Security
+    - name: Get contract associations
+      ignore_errors: true
+      cisco.dcnm.dcnm_rest:
+        method: GET
+        path: "/appcenter/cisco/ndfc/api/v1/security/fabrics/{{fabric.name }}/contractAssociations?vrfName=hyper_vrf"
+      register: contract_associations
+      tags:
+        - delete
+        - contract_associations
+
+    - name: Extract UUIDs as comma-separated list
+      ignore_errors: true
+      when: contract_associations.response.DATA | length > 0
+      set_fact:
+        uuid_list: "{{ contract_associations.response.DATA | map(attribute='uuid') | list | join(',') }}"
+      tags:
+        - delete
+        - contract_associations
+
+    - name: Delete contract associations
+      ignore_errors: true
+      cisco.dcnm.dcnm_rest:
+        method: DELETE
+        path: "/appcenter/cisco/ndfc/api/v1/security/fabrics/{{fabric.name }}/contractAssociations?uuid={{ uuid_list }}"
+      tags:
+        - delete
+        - contract_associations
+
+    - name: Delete security groups
+      ignore_errors: true
+      cisco.dcnm.dcnm_rest:
+        method: DELETE
+        path: "/appcenter/cisco/ndfc/api/v1/security/fabrics/{{fabric.name }}/groups/{{ item.sgt | int }}"
+      loop: "{{ gpo.security_groups }}"
+      tags:
+        - delete
+        - security_groups
+
+    - name: Delete contracts
+      cisco.dcnm.dcnm_rest:
+        method: DELETE
+        path: "/appcenter/cisco/ndfc/api/v1/security/fabrics/{{fabric.name }}/contracts/{{ item.name }}"
+      loop: "{{ gpo.contracts }}"
+      tags:
+        - delete
+        - contracts
+
+    - name: Delete protocol filters
+      ignore_errors: true
+      cisco.dcnm.dcnm_rest:
+        method: DELETE
+        path: "/appcenter/cisco/ndfc/api/v1/security/fabrics/{{fabric.name }}/protocols/{{ item.name }}"
+      loop: "{{ gpo.filters }}"
+      tags:
+        - delete
+        - filters
+
+    - name: Get current VRF configuration from NDFC
+      tags: vrf
+      cisco.dcnm.dcnm_rest:
+        method: GET
+        path: "/appcenter/cisco/ndfc/api/v1/lan-fabric/rest/top-down/fabrics/{{ fabric.name }}/vrfs/hyper_vrf"
+      register: vrf_get
+
+    - name: Print current VRF configuration
+      tags: vrf
+      debug:
+        var: vrf_get.response
+
+    - name: Update VRF configuration with new enforce, defaultSGTag, and defaultSecurityTag
+      tags: vrf
+      vars:
+        # 1) Take the original vrfTemplateConfig (which is a JSON‐string), parse it,
+        #    merge in both sgEnforceType and defaultSecurityTag, then re‐serialize to JSON.
+        updated_vrfTemplateConfig: >-
+          {{ 
+            vrf_get.response.DATA.vrfTemplateConfig
+            | from_json
+            | combine({
+                "sgEnforceType": "unenforced",
+                "defaultSecurityTag": 0
+              })
+            | to_json 
+          }}
+
+      cisco.dcnm.dcnm_rest:
+        method: PUT
+        path: "/appcenter/cisco/ndfc/api/v1/lan-fabric/rest/top-down/fabrics/{{ fabric.name }}/vrfs/hyper_vrf"
+        json_data: >-
+          {{
+            vrf_get.response.DATA
+            | combine({
+                "enforce": "unenforced",
+                "defaultSGTag": 0,
+                "vrfTemplateConfig": updated_vrfTemplateConfig
+              })
+            | to_json
+          }}
+
+    - name: Deploy VRFs via raw POST
+      tags:
+        - deploy
+      cisco.dcnm.dcnm_rest:
+        method: POST
+        path: "/appcenter/cisco/ndfc/api/v1/lan-fabric/rest/top-down/vrfs/deploy"
+        json_data: "{{ {
+          'FDO270907B8':  'hyper_vrf',
+          'FDO27090FBU':  'hyper_vrf',
+          'FDO27090738':  'hyper_vrf',
+          'FDO28270EAW':  'hyper_vrf',
+          'FDO28270F1X':  'hyper_vrf',
+          'FDO28270EBY':  'hyper_vrf',
+          'FDO270907B2':  'hyper_vrf',
+          'FDO27090FK6':  'hyper_vrf',
+          'FDO24030UZ8':  'hyper_vrf',
+          'FDO28260ZA8':  'hyper_vrf'} | to_json }}"
+      register: vrf_deploy_result
+
+    - name: Show deploy response
+      debug:
+        var: vrf_deploy_result.response

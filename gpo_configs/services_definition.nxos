@@ -1,0 +1,16 @@
+security-group 10091 name ONE-ARM-CHAIN-1-SERVICE
+  type layer4-7
+  match interface Vlan3101 
+  match interface Vlan3102
+
+epbr service FIREWALL-1-SITE-1
+  vrf hyper_vrf
+  security-group 10091
+  probe icmp frequency 2 retry-down-count 1 retry-up-count 5 timeout 1 source-interface loopback98
+  service-end-point ip 172.17.91.101
+
+epbr service FIREWALL-1-SITE-2
+  vrf hyper_vrf
+  security-group 10091
+  probe icmp frequency 2 retry-down-count 1 retry-up-count 5 timeout 1 source-interface loopback98
+  service-end-point ip 172.17.92.101
